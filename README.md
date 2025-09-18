@@ -64,6 +64,11 @@ Besides the standard CMake build and installation options, there are some
 libdeflate-specific build options.  See `CMakeLists.txt` for the list of these
 options.  To set an option, add `-DOPTION=VALUE` to the `cmake` command.
 
+When targeting Linux on x86-64, you can enable
+`-DLIBDEFLATE_ENABLE_RDTSC_TIMING=ON` to gather low-overhead timestamp and
+cycle data for each decompression.  This instrumentation is disabled by default
+and has no effect on the exported ABI unless explicitly enabled.
+
 Prebuilt Windows binaries can be downloaded from
 https://github.com/ebiggers/libdeflate/releases.
 
@@ -118,6 +123,16 @@ cause build errors like "no such instruction" from the assembler.
 libdeflate has a simple API that is not zlib-compatible.  You can create
 compressors and decompressors and use them to compress or decompress buffers.
 See libdeflate.h for details.
+
+### Decompression timing (optional)
+
+When libdeflate is built with `-DLIBDEFLATE_ENABLE_RDTSC_TIMING=ON` on Linux
+x86-64, each `libdeflate_decompressor` records timestamp and cycle data for the
+most recent decompression.  Applications can access this information using
+`libdeflate_get_decompress_timing()` for a read-only view or
+`libdeflate_copy_decompress_timing()` to copy the data out of the object.  Both
+functions are declared in `libdeflate.h` and are only available when the timing
+option is enabled at build time.
 
 There is currently no support for streaming.  This has been considered, but it
 always significantly increases complexity and slows down fast paths.

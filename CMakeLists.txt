@@ -35,6 +35,8 @@ option(LIBDEFLATE_COMPRESSION_SUPPORT "Support compression" ON)
 option(LIBDEFLATE_DECOMPRESSION_SUPPORT "Support decompression" ON)
 option(LIBDEFLATE_ZLIB_SUPPORT "Support the zlib format" ON)
 option(LIBDEFLATE_GZIP_SUPPORT "Support the gzip format" ON)
+option(LIBDEFLATE_ENABLE_RDTSC_TIMING
+       "Enable x86-64 RDTSC timing for decompression" OFF)
 option(LIBDEFLATE_FREESTANDING
        "Build a freestanding library, i.e. a library that doesn't link to any
        libc functions like malloc(), free(), and memcpy().  Library users will
@@ -50,6 +52,20 @@ endif()
 
 if(LIBDEFLATE_BUILD_TESTS)
     enable_testing()
+endif()
+
+# RDTSC-based timing only applies to decompression on Linux x86-64.
+if(LIBDEFLATE_ENABLE_RDTSC_TIMING)
+    if(NOT LIBDEFLATE_DECOMPRESSION_SUPPORT)
+        message(FATAL_ERROR "RDTSC timing requires decompression support")
+    endif()
+    if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        message(FATAL_ERROR "RDTSC timing is only supported on Linux")
+    endif()
+    if(NOT CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
+        message(FATAL_ERROR "RDTSC timing is only supported on x86-64")
+    endif()
+    list(APPEND LIB_COMPILE_DEFINITIONS LIBDEFLATE_ENABLE_RDTSC_TIMING=1)
 endif()
 
 # The gzip program can't be built if any library feature it needs is disabled.
@@ -201,6 +217,11 @@ if(LIBDEFLATE_DECOMPRESSION_SUPPORT)
          lib/deflate_decompress.c
          lib/x86/decompress_impl.h
     )
+    if(LIBDEFLATE_ENABLE_RDTSC_TIMING)
+        list(APPEND LIB_SOURCES
+             lib/timing_internal.h
+             lib/timing_x86.h)
+    endif()
 endif()
 if(LIBDEFLATE_ZLIB_SUPPORT)
     list(APPEND LIB_SOURCES
