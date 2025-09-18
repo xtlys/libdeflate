@@ -58,16 +58,24 @@ FUNCNAME(struct libdeflate_decompressor * restrict d,
 	const u8 * const in_fastloop_end =
 		in_end - MIN(in_nbytes, FASTLOOP_MAX_BYTES_READ);
 	bitbuf_t bitbuf = 0;
-	bitbuf_t saved_bitbuf;
-	u32 bitsleft = 0;
-	size_t overread_count = 0;
+        bitbuf_t saved_bitbuf;
+        u32 bitsleft = 0;
+        size_t overread_count = 0;
 
-	bool is_final_block;
-	unsigned block_type;
-	unsigned num_litlen_syms;
-	unsigned num_offset_syms;
-	bitbuf_t litlen_tablemask;
-	u32 entry;
+        bool is_final_block;
+        unsigned block_type;
+        unsigned num_litlen_syms;
+        unsigned num_offset_syms;
+        bitbuf_t litlen_tablemask;
+        u32 entry;
+
+#ifdef LIBDEFLATE_ENABLE_RDTSC_TIMING
+        struct libdeflate_timing_info * const timing = &d->__timing;
+        uint64_t timing_dyn_build_start = 0;
+        bool timing_dyn_build_active = false;
+        uint64_t timing_decode_start = 0;
+        bool timing_decode_active = false;
+#endif
 
 next_block:
 	/* Starting to read the next block */
@@ -82,19 +90,26 @@ next_block:
 	/* BTYPE: 2 bits */
 	block_type = (bitbuf >> 1) & BITMASK(2);
 
-	if (block_type == DEFLATE_BLOCKTYPE_DYNAMIC_HUFFMAN) {
+        if (block_type == DEFLATE_BLOCKTYPE_DYNAMIC_HUFFMAN) {
 
-		/* Dynamic Huffman block */
+                /* Dynamic Huffman block */
 
-		/* The order in which precode lengths are stored */
-		static const u8 deflate_precode_lens_permutation[DEFLATE_NUM_PRECODE_SYMS] = {
-			16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15
-		};
+                /* The order in which precode lengths are stored */
+                static const u8 deflate_precode_lens_permutation[DEFLATE_NUM_PRECODE_SYMS] = {
+                        16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15
+                };
 
-		unsigned num_explicit_precode_lens;
-		unsigned i;
+                unsigned num_explicit_precode_lens;
+                unsigned i;
 
-		/* Read the codeword length counts. */
+#ifdef LIBDEFLATE_ENABLE_RDTSC_TIMING
+                timing->basic.blocks_dynamic++;
+                timing->basic.dyn_tables_built++;
+                timing_dyn_build_start = libdeflate_rdtsc_begin();
+                timing_dyn_build_active = true;
+#endif
+
+                /* Read the codeword length counts. */
 
 		STATIC_ASSERT(DEFLATE_NUM_LITLEN_SYMS == 257 + BITMASK(5));
 		num_litlen_syms = 257 + ((bitbuf >> 3) & BITMASK(5));
@@ -244,12 +259,16 @@ next_block:
 		/* Unnecessary, but check this for consistency with zlib. */
 		SAFETY_CHECK(i == num_litlen_syms + num_offset_syms);
 
-	} else if (block_type == DEFLATE_BLOCKTYPE_UNCOMPRESSED) {
-		u16 len, nlen;
+        } else if (block_type == DEFLATE_BLOCKTYPE_UNCOMPRESSED) {
+                u16 len, nlen;
 
-		/*
-		 * Uncompressed block: copy 'len' bytes literally from the input
-		 * buffer to the output buffer.
+#ifdef LIBDEFLATE_ENABLE_RDTSC_TIMING
+                timing->basic.blocks_stored++;
+#endif
+
+                /*
+                 * Uncompressed block: copy 'len' bytes literally from the input
+                 * buffer to the output buffer.
 		 */
 
 		bitsleft -= 3; /* for BTYPE and BFINAL */
@@ -274,8 +293,9 @@ next_block:
 		in_next += 4;
 
 		SAFETY_CHECK(len == (u16)~nlen);
-		if (unlikely(len > out_end - out_next))
-			return LIBDEFLATE_INSUFFICIENT_SPACE;
+                if (unlikely(len > out_end - out_next)) {
+                        LIBDEFLATE_RETURN(LIBDEFLATE_INSUFFICIENT_SPACE);
+                }
 		SAFETY_CHECK(len <= in_end - in_next);
 
 		memcpy(out_next, in_next, len);
@@ -284,10 +304,14 @@ next_block:
 
 		goto block_done;
 
-	} else {
-		unsigned i;
+        } else {
+                unsigned i;
 
-		SAFETY_CHECK(block_type == DEFLATE_BLOCKTYPE_STATIC_HUFFMAN);
+#ifdef LIBDEFLATE_ENABLE_RDTSC_TIMING
+                timing->basic.blocks_fixed++;
+#endif
+
+                SAFETY_CHECK(block_type == DEFLATE_BLOCKTYPE_STATIC_HUFFMAN);
 
 		/*
 		 * Static Huffman block: build the decode tables for the static
@@ -331,10 +355,21 @@ next_block:
 	SAFETY_CHECK(build_offset_decode_table(d, num_litlen_syms, num_offset_syms));
 	SAFETY_CHECK(build_litlen_decode_table(d, num_litlen_syms, num_offset_syms));
 have_decode_tables:
-	litlen_tablemask = BITMASK(d->litlen_tablebits);
+        litlen_tablemask = BITMASK(d->litlen_tablebits);
 
-	/*
-	 * This is the "fastloop" for decoding literals and matches.  It does
+#ifdef LIBDEFLATE_ENABLE_RDTSC_TIMING
+        if (timing_dyn_build_active) {
+                timing->agg.cycles_dyn_build +=
+                        libdeflate_timing_rdtsc_end_record(d) -
+                        timing_dyn_build_start;
+                timing_dyn_build_active = false;
+        }
+        timing_decode_start = libdeflate_rdtsc_begin();
+        timing_decode_active = true;
+#endif
+
+        /*
+         * This is the "fastloop" for decoding literals and matches.  It does
 	 * bounds checks on in_next and out_next in the loop conditions so that
 	 * additional bounds checks aren't needed inside the loop body.
 	 *
@@ -696,17 +731,19 @@ generic_loop:
 			bitsleft -= entry;
 		}
 		length = entry >> 16;
-		if (entry & HUFFDEC_LITERAL) {
-			if (unlikely(out_next == out_end))
-				return LIBDEFLATE_INSUFFICIENT_SPACE;
-			*out_next++ = length;
-			continue;
-		}
-		if (unlikely(entry & HUFFDEC_END_OF_BLOCK))
-			goto block_done;
-		length += EXTRACT_VARBITS8(saved_bitbuf, entry) >> (u8)(entry >> 8);
-		if (unlikely(length > out_end - out_next))
-			return LIBDEFLATE_INSUFFICIENT_SPACE;
+                if (entry & HUFFDEC_LITERAL) {
+                        if (unlikely(out_next == out_end)) {
+                                LIBDEFLATE_RETURN(LIBDEFLATE_INSUFFICIENT_SPACE);
+                        }
+                        *out_next++ = length;
+                        continue;
+                }
+                if (unlikely(entry & HUFFDEC_END_OF_BLOCK))
+                        goto block_done;
+                length += EXTRACT_VARBITS8(saved_bitbuf, entry) >> (u8)(entry >> 8);
+                if (unlikely(length > out_end - out_next)) {
+                        LIBDEFLATE_RETURN(LIBDEFLATE_INSUFFICIENT_SPACE);
+                }
 
 		if (!CAN_CONSUME(LENGTH_MAXBITS + OFFSET_MAXBITS))
 			REFILL_BITS();
@@ -738,9 +775,17 @@ generic_loop:
 	}
 
 block_done:
-	/* Finished decoding a block */
+#ifdef LIBDEFLATE_ENABLE_RDTSC_TIMING
+        if (timing_decode_active) {
+                timing->agg.cycles_decode +=
+                        libdeflate_timing_rdtsc_end_record(d) -
+                        timing_decode_start;
+                timing_decode_active = false;
+        }
+#endif
+        /* Finished decoding a block */
 
-	if (!is_final_block)
+        if (!is_final_block)
 		goto next_block;
 
 	/* That was the last block. */
@@ -765,10 +810,11 @@ block_done:
 	if (actual_out_nbytes_ret) {
 		*actual_out_nbytes_ret = out_next - (u8 *)out;
 	} else {
-		if (out_next != out_end)
-			return LIBDEFLATE_SHORT_OUTPUT;
-	}
-	return LIBDEFLATE_SUCCESS;
+                if (out_next != out_end) {
+                        LIBDEFLATE_RETURN(LIBDEFLATE_SHORT_OUTPUT);
+                }
+        }
+        LIBDEFLATE_RETURN(LIBDEFLATE_SUCCESS);
 }
 
 #undef FUNCNAME

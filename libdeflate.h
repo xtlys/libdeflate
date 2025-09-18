@@ -308,10 +308,49 @@ libdeflate_gzip_decompress(struct libdeflate_decompressor *decompressor,
  */
 LIBDEFLATEAPI enum libdeflate_result
 libdeflate_gzip_decompress_ex(struct libdeflate_decompressor *decompressor,
-			      const void *in, size_t in_nbytes,
-			      void *out, size_t out_nbytes_avail,
-			      size_t *actual_in_nbytes_ret,
-			      size_t *actual_out_nbytes_ret);
+                              const void *in, size_t in_nbytes,
+                              void *out, size_t out_nbytes_avail,
+                              size_t *actual_in_nbytes_ret,
+                              size_t *actual_out_nbytes_ret);
+
+#ifdef LIBDEFLATE_ENABLE_RDTSC_TIMING
+#define LIBD_TPOINTS 6
+
+struct libdeflate_timing_basic {
+        uint64_t t_enter;
+        uint64_t t_wrapper_parsed;
+        uint64_t t_core_start;
+        uint64_t t_core_done;
+        uint64_t t_checksum_done;
+        uint64_t t_exit;
+        uint32_t blocks_fixed;
+        uint32_t blocks_dynamic;
+        uint32_t blocks_stored;
+        uint32_t dyn_tables_built;
+};
+
+struct libdeflate_timing_agg {
+        uint64_t cycles_wrapper;
+        uint64_t cycles_dyn_build;
+        uint64_t cycles_decode;
+        uint64_t cycles_checksum;
+        uint64_t cycles_total;
+        uint32_t cpu_aux_enter;
+        uint32_t cpu_aux_exit;
+};
+
+struct libdeflate_timing_info {
+        struct libdeflate_timing_basic basic;
+        struct libdeflate_timing_agg agg;
+};
+
+LIBDEFLATEAPI const struct libdeflate_timing_info *
+libdeflate_get_decompress_timing(const struct libdeflate_decompressor *decompressor);
+
+LIBDEFLATEAPI int
+libdeflate_copy_decompress_timing(const struct libdeflate_decompressor *decompressor,
+                                  struct libdeflate_timing_info *out);
+#endif
 
 /*
  * libdeflate_free_decompressor() frees a decompressor that was allocated with

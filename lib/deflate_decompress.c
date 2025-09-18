@@ -44,6 +44,10 @@
 
 #include "lib_common.h"
 #include "deflate_constants.h"
+#include "timing_internal.h"
+#ifdef LIBDEFLATE_ENABLE_RDTSC_TIMING
+#include "timing_x86.h"
+#endif
 
 /*
  * If the expression passed to SAFETY_CHECK() evaluates to false, then the
@@ -669,12 +673,160 @@ struct libdeflate_decompressor {
 	/* used only during build_decode_table() */
 	u16 sorted_syms[DEFLATE_MAX_NUM_SYMS];
 
-	bool static_codes_loaded;
-	unsigned litlen_tablebits;
+        bool static_codes_loaded;
+        unsigned litlen_tablebits;
 
-	/* The free() function for this struct, chosen at allocation time */
-	free_func_t free_func;
+        /* The free() function for this struct, chosen at allocation time */
+        free_func_t free_func;
+#ifdef LIBDEFLATE_ENABLE_RDTSC_TIMING
+        struct libdeflate_timing_info __timing;
+        bool __timing_aux_enter_recorded;
+        bool __timing_in_progress;
+#endif
 };
+
+#ifdef LIBDEFLATE_ENABLE_RDTSC_TIMING
+
+static inline uint64_t
+libdeflate_timing_rdtsc_end_record(struct libdeflate_decompressor *d)
+{
+        unsigned int aux;
+        uint64_t now = libdeflate_rdtsc_end(&aux);
+
+        if (!d->__timing_aux_enter_recorded) {
+                d->__timing.agg.cpu_aux_enter = aux;
+                d->__timing_aux_enter_recorded = true;
+        }
+        return now;
+}
+
+uint64_t
+libdeflate_timing_section_begin(void)
+{
+        return libdeflate_rdtsc_begin();
+}
+
+void
+libdeflate_timing_begin(struct libdeflate_decompressor *d)
+{
+        memset(&d->__timing, 0, sizeof(d->__timing));
+        d->__timing_aux_enter_recorded = false;
+        d->__timing_in_progress = true;
+        d->__timing.basic.t_enter = libdeflate_rdtsc_begin();
+        d->__timing.basic.t_wrapper_parsed = d->__timing.basic.t_enter;
+}
+
+void
+libdeflate_timing_wrapper_end(struct libdeflate_decompressor *d,
+                              uint64_t start, bool record_timestamp)
+{
+        uint64_t now = libdeflate_timing_rdtsc_end_record(d);
+
+        if (record_timestamp)
+                d->__timing.basic.t_wrapper_parsed = now;
+        d->__timing.agg.cycles_wrapper += now - start;
+}
+
+void
+libdeflate_timing_core_begin(struct libdeflate_decompressor *d)
+{
+        d->__timing.basic.t_core_start = libdeflate_rdtsc_begin();
+}
+
+void
+libdeflate_timing_core_end(struct libdeflate_decompressor *d)
+{
+        d->__timing.basic.t_core_done = libdeflate_timing_rdtsc_end_record(d);
+}
+
+uint64_t
+libdeflate_timing_checksum_begin(void)
+{
+        return libdeflate_rdtsc_begin();
+}
+
+void
+libdeflate_timing_checksum_end(struct libdeflate_decompressor *d,
+                               uint64_t start)
+{
+        uint64_t now = libdeflate_timing_rdtsc_end_record(d);
+
+        d->__timing.basic.t_checksum_done = now;
+        d->__timing.agg.cycles_checksum += now - start;
+}
+
+void
+libdeflate_timing_set_checksum_done(struct libdeflate_decompressor *d)
+{
+        if (d->__timing.basic.t_checksum_done == 0)
+                d->__timing.basic.t_checksum_done = d->__timing.basic.t_core_done;
+}
+
+void
+libdeflate_timing_finish(struct libdeflate_decompressor *d)
+{
+        struct libdeflate_timing_basic *basic = &d->__timing.basic;
+        unsigned int aux;
+        uint64_t exit_time;
+
+        if (basic->t_wrapper_parsed == 0)
+                basic->t_wrapper_parsed = basic->t_enter;
+        if (basic->t_core_start == 0)
+                basic->t_core_start = basic->t_wrapper_parsed;
+        if (basic->t_core_done == 0)
+                basic->t_core_done = basic->t_core_start;
+        if (basic->t_checksum_done == 0)
+                basic->t_checksum_done = basic->t_core_done;
+
+        exit_time = libdeflate_rdtsc_end(&aux);
+
+        if (!d->__timing_aux_enter_recorded) {
+                d->__timing.agg.cpu_aux_enter = aux;
+                d->__timing_aux_enter_recorded = true;
+        }
+        basic->t_exit = exit_time;
+        d->__timing.agg.cycles_total = exit_time - basic->t_enter;
+        d->__timing.agg.cpu_aux_exit = aux;
+        d->__timing_in_progress = false;
+}
+
+#endif /* LIBDEFLATE_ENABLE_RDTSC_TIMING */
+
+#ifdef LIBDEFLATE_ENABLE_RDTSC_TIMING
+static inline enum libdeflate_result
+libdeflate_timing_return_result(struct libdeflate_decompressor *d,
+                                enum libdeflate_result result,
+                                bool *decode_active, uint64_t *decode_start,
+                                bool *dyn_active, uint64_t *dyn_start)
+{
+        if (*dyn_active) {
+                d->__timing.agg.cycles_dyn_build +=
+                        libdeflate_timing_rdtsc_end_record(d) - *dyn_start;
+                *dyn_active = false;
+        }
+        if (*decode_active) {
+                d->__timing.agg.cycles_decode +=
+                        libdeflate_timing_rdtsc_end_record(d) - *decode_start;
+                *decode_active = false;
+        }
+        return result;
+}
+#define LIBDEFLATE_RETURN(res) \
+        return libdeflate_timing_return_result(d, (res), \
+                                               &timing_decode_active, \
+                                               &timing_decode_start, \
+                                               &timing_dyn_build_active, \
+                                               &timing_dyn_build_start)
+#else
+#define LIBDEFLATE_RETURN(res) return (res)
+#endif
+
+#ifdef LIBDEFLATE_ENABLE_RDTSC_TIMING
+#undef SAFETY_CHECK
+#define SAFETY_CHECK(expr) \
+        if (unlikely(!(expr))) \
+                LIBDEFLATE_RETURN(LIBDEFLATE_BAD_DATA)
+#endif
 
 /*
  * Build a table for fast decoding of symbols from a Huffman code.  As input,
@@ -1088,6 +1240,8 @@ typedef enum libdeflate_result (*decompress_func_t)
 #  include "x86/decompress_impl.h"
 #endif
 
+#undef LIBDEFLATE_RETURN
+
 #ifndef DEFAULT_IMPL
 #  define DEFAULT_IMPL deflate_decompress_default
 #endif
@@ -1132,13 +1286,27 @@ dispatch_decomp(struct libdeflate_decompressor *d,
  */
 LIBDEFLATEAPI enum libdeflate_result
 libdeflate_deflate_decompress_ex(struct libdeflate_decompressor *d,
-				 const void *in, size_t in_nbytes,
-				 void *out, size_t out_nbytes_avail,
-				 size_t *actual_in_nbytes_ret,
-				 size_t *actual_out_nbytes_ret)
+                                 const void *in, size_t in_nbytes,
+                                 void *out, size_t out_nbytes_avail,
+                                 size_t *actual_in_nbytes_ret,
+                                 size_t *actual_out_nbytes_ret)
 {
-	return decompress_impl(d, in, in_nbytes, out, out_nbytes_avail,
-			       actual_in_nbytes_ret, actual_out_nbytes_ret);
+        enum libdeflate_result result;
+        bool timing_owner = false;
+
+        if (!d->__timing_in_progress) {
+                libdeflate_timing_begin(d);
+                timing_owner = true;
+        }
+        libdeflate_timing_core_begin(d);
+        result = decompress_impl(d, in, in_nbytes, out, out_nbytes_avail,
+                                 actual_in_nbytes_ret, actual_out_nbytes_ret);
+        libdeflate_timing_core_end(d);
+        if (timing_owner) {
+                libdeflate_timing_set_checksum_done(d);
+                libdeflate_timing_finish(d);
+        }
+        return result;
 }
 
 LIBDEFLATEAPI enum libdeflate_result
@@ -1203,6 +1371,26 @@ libdeflate_alloc_decompressor(void)
 LIBDEFLATEAPI void
 libdeflate_free_decompressor(struct libdeflate_decompressor *d)
 {
-	if (d)
-		d->free_func(d);
+        if (d)
+                d->free_func(d);
 }
+
+#ifdef LIBDEFLATE_ENABLE_RDTSC_TIMING
+LIBDEFLATEAPI const struct libdeflate_timing_info *
+libdeflate_get_decompress_timing(const struct libdeflate_decompressor *d)
+{
+        if (d == NULL)
+                return NULL;
+        return &d->__timing;
+}
+
+LIBDEFLATEAPI int
+libdeflate_copy_decompress_timing(const struct libdeflate_decompressor *d,
+                                  struct libdeflate_timing_info *out)
+{
+        if (d == NULL || out == NULL)
+                return -1;
+        *out = d->__timing;
+        return 0;
+}
+#endif

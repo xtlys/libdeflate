@@ -26,70 +26,90 @@
  */
 
 #include "lib_common.h"
+#include "timing_internal.h"
 #include "zlib_constants.h"
 
 LIBDEFLATEAPI enum libdeflate_result
 libdeflate_zlib_decompress_ex(struct libdeflate_decompressor *d,
-			      const void *in, size_t in_nbytes,
-			      void *out, size_t out_nbytes_avail,
-			      size_t *actual_in_nbytes_ret,
-			      size_t *actual_out_nbytes_ret)
+                              const void *in, size_t in_nbytes,
+                              void *out, size_t out_nbytes_avail,
+                              size_t *actual_in_nbytes_ret,
+                              size_t *actual_out_nbytes_ret)
 {
-	const u8 *in_next = in;
-	const u8 * const in_end = in_next + in_nbytes;
-	u16 hdr;
-	size_t actual_in_nbytes;
-	size_t actual_out_nbytes;
-	enum libdeflate_result result;
+        const u8 *in_next = in;
+        const u8 * const in_end = in_next + in_nbytes;
+        u16 hdr;
+        size_t actual_in_nbytes;
+        size_t actual_out_nbytes;
+        enum libdeflate_result result = LIBDEFLATE_BAD_DATA;
+        uint64_t wrapper_start;
+        uint64_t checksum_start;
+        u32 computed_checksum;
 
-	if (in_nbytes < ZLIB_MIN_OVERHEAD)
-		return LIBDEFLATE_BAD_DATA;
+        libdeflate_timing_begin(d);
+        wrapper_start = libdeflate_timing_section_begin();
 
-	/* 2 byte header: CMF and FLG  */
-	hdr = get_unaligned_be16(in_next);
-	in_next += 2;
+        if (in_nbytes < ZLIB_MIN_OVERHEAD)
+                goto out;
 
-	/* FCHECK */
-	if ((hdr % 31) != 0)
-		return LIBDEFLATE_BAD_DATA;
+        /* 2 byte header: CMF and FLG  */
+        hdr = get_unaligned_be16(in_next);
+        in_next += 2;
 
-	/* CM */
-	if (((hdr >> 8) & 0xF) != ZLIB_CM_DEFLATE)
-		return LIBDEFLATE_BAD_DATA;
+        /* FCHECK */
+        if ((hdr % 31) != 0)
+                goto out;
 
-	/* CINFO */
-	if ((hdr >> 12) > ZLIB_CINFO_32K_WINDOW)
-		return LIBDEFLATE_BAD_DATA;
+        /* CM */
+        if (((hdr >> 8) & 0xF) != ZLIB_CM_DEFLATE)
+                goto out;
 
-	/* FDICT */
-	if ((hdr >> 5) & 1)
-		return LIBDEFLATE_BAD_DATA;
+        /* CINFO */
+        if ((hdr >> 12) > ZLIB_CINFO_32K_WINDOW)
+                goto out;
 
-	/* Compressed data  */
-	result = libdeflate_deflate_decompress_ex(d, in_next,
-					in_end - ZLIB_FOOTER_SIZE - in_next,
-					out, out_nbytes_avail,
-					&actual_in_nbytes, actual_out_nbytes_ret);
-	if (result != LIBDEFLATE_SUCCESS)
-		return result;
+        /* FDICT */
+        if ((hdr >> 5) & 1)
+                goto out;
 
-	if (actual_out_nbytes_ret)
-		actual_out_nbytes = *actual_out_nbytes_ret;
-	else
-		actual_out_nbytes = out_nbytes_avail;
+        libdeflate_timing_wrapper_end(d, wrapper_start, true);
 
-	in_next += actual_in_nbytes;
+        /* Compressed data  */
+        result = libdeflate_deflate_decompress_ex(d, in_next,
+                                        in_end - ZLIB_FOOTER_SIZE - in_next,
+                                        out, out_nbytes_avail,
+                                        &actual_in_nbytes, actual_out_nbytes_ret);
+        if (result != LIBDEFLATE_SUCCESS)
+                goto out;
 
-	/* ADLER32  */
-	if (libdeflate_adler32(1, out, actual_out_nbytes) !=
-	    get_unaligned_be32(in_next))
-		return LIBDEFLATE_BAD_DATA;
-	in_next += 4;
+        if (actual_out_nbytes_ret)
+                actual_out_nbytes = *actual_out_nbytes_ret;
+        else
+                actual_out_nbytes = out_nbytes_avail;
 
-	if (actual_in_nbytes_ret)
-		*actual_in_nbytes_ret = in_next - (u8 *)in;
+        wrapper_start = libdeflate_timing_section_begin();
+        in_next += actual_in_nbytes;
+        libdeflate_timing_wrapper_end(d, wrapper_start, false);
 
-	return LIBDEFLATE_SUCCESS;
+        /* ADLER32  */
+        checksum_start = libdeflate_timing_checksum_begin();
+        computed_checksum = libdeflate_adler32(1, out, actual_out_nbytes);
+        libdeflate_timing_checksum_end(d, checksum_start);
+        if (computed_checksum != get_unaligned_be32(in_next))
+                goto out;
+        in_next += 4;
+
+        wrapper_start = libdeflate_timing_section_begin();
+        if (actual_in_nbytes_ret)
+                *actual_in_nbytes_ret = in_next - (u8 *)in;
+        libdeflate_timing_wrapper_end(d, wrapper_start, false);
+
+        result = LIBDEFLATE_SUCCESS;
+
+out:
+        libdeflate_timing_set_checksum_done(d);
+        libdeflate_timing_finish(d);
+        return result;
 }
 
 LIBDEFLATEAPI enum libdeflate_result
